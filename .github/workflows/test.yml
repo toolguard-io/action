@@ -12,10 +12,12 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: false
 
       # A fresh baseline against a live server makes the happy path
       # deterministic within this run: the diff is empty by construction.

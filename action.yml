@@ -72,7 +72,9 @@ runs:
   using: composite
   steps:
     - name: Install uv
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@v8
+      with:
+        enable-cache: false
 
     - name: Run mcp-toolguard ci
       id: run

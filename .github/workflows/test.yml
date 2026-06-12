@@ -1,0 +1,75 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # A fresh baseline against a live server makes the happy path
+      # deterministic within this run: the diff is empty by construction.
+      - name: Create a baseline for the test target
+        run: uvx mcp-toolguard baseline https://mcp.deepwiki.com/mcp
+
+      - name: Run the action — clean diff must pass
+        id: pass
+        uses: ./
+        with:
+          target: https://mcp.deepwiki.com/mcp
+
+      - name: Assert it passed
+        env:
+          PASSED: ${{ steps.pass.outputs.passed }}
+          CODE: ${{ steps.pass.outputs.exit-code }}
+        run: |
+          test "$PASSED" = "true"
+          test "$CODE" = "0"
+
+      # Diffing a different server against the same baseline guarantees
+      # breaking changes, so the default policy must fail with exit 1.
+      - name: Run the action — mismatched server must fail the gate
+        id: fail
+        continue-on-error: true
+        uses: ./
+        with:
+          target: https://learn.microsoft.com/api/mcp
+          comment: "false"
+
+      - name: Assert it failed as a policy failure
+        env:
+          OUTCOME: ${{ steps.fail.outcome }}
+          PASSED: ${{ steps.fail.outputs.passed }}
+          CODE: ${{ steps.fail.outputs.exit-code }}
+        run: |
+          test "$OUTCOME" = "failure"
+          test "$PASSED" = "false"
+          test "$CODE" = "1"
+
+      # An unreachable target is an operational error, not a policy verdict.
+      - name: Run the action — unreachable server must exit 2
+        id: error
+        continue-on-error: true
+        uses: ./
+        with:
+          target: https://toolguard.invalid/mcp
+          comment: "false"
+          timeout: "10"
+
+      - name: Assert it failed as an operational error
+        env:
+          OUTCOME: ${{ steps.error.outcome }}
+          CODE: ${{ steps.error.outputs.exit-code }}
+        run: |
+          test "$OUTCOME" = "failure"
+          test "$CODE" = "2"

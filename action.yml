@@ -1,0 +1,158 @@
+name: "ToolGuard"
+description: >-
+  Contract checks for MCP servers in your pull requests: classified diff
+  against a committed baseline plus MCP spec validation, gated by policy,
+  with a single updatable PR comment.
+author: "toolguard-io"
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  target:
+    description: >-
+      MCP server to check: an http(s) URL (streamable HTTP) or a stdio
+      command, e.g. "python -m my_mcp_server".
+    required: true
+  policy:
+    description: >-
+      Gate policy: audit (never fail), breaking (fail on breaking changes or
+      spec errors), strict (fail on any change or any finding above info).
+    required: false
+    default: "breaking"
+  baseline:
+    description: "Path to the committed baseline file."
+    required: false
+    default: ".toolguard/baseline.json"
+  spec-versions:
+    description: >-
+      MCP spec versions to validate, comma-separated. Empty uses the CLI's
+      default matrix.
+    required: false
+    default: ""
+  timeout:
+    description: "Connection timeout in seconds."
+    required: false
+    default: "30"
+  comment:
+    description: >-
+      Post and keep updated a single PR comment with the report. Only applies
+      to pull_request events.
+    required: false
+    default: "true"
+  comment-id:
+    description: >-
+      Distinguishes comments when the action runs more than once per PR
+      (e.g. one job per server). Each id maps to its own sticky comment.
+    required: false
+    default: "toolguard"
+  github-token:
+    description: "Token used to post the PR comment (needs pull-requests: write)."
+    required: false
+    default: ${{ github.token }}
+  version:
+    description: >-
+      mcp-toolguard version to run, e.g. "0.1.0". Empty uses the latest
+      release on PyPI.
+    required: false
+    default: ""
+
+outputs:
+  passed:
+    description: '"true" when the policy gate passed.'
+    value: ${{ steps.run.outputs.passed }}
+  exit-code:
+    description: "CLI exit code: 0 ok, 1 policy failure, 2 operational error."
+    value: ${{ steps.run.outputs.exit-code }}
+  report:
+    description: "Path to the Markdown report."
+    value: ${{ steps.run.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+
+    - name: Run mcp-toolguard ci
+      id: run
+      shell: bash
+      env:
+        TG_TARGET: ${{ inputs.target }}
+        TG_POLICY: ${{ inputs.policy }}
+        TG_BASELINE: ${{ inputs.baseline }}
+        TG_SPEC_VERSIONS: ${{ inputs.spec-versions }}
+        TG_TIMEOUT: ${{ inputs.timeout }}
+        TG_VERSION: ${{ inputs.version }}
+      run: |
+        set -u
+        report="$RUNNER_TEMP/toolguard-report.md"
+        stderr="$RUNNER_TEMP/toolguard-stderr.txt"
+
+        args=(ci "$TG_TARGET" --policy "$TG_POLICY" --baseline "$TG_BASELINE" \
+              --timeout "$TG_TIMEOUT" --markdown)
+        if [ -n "$TG_SPEC_VERSIONS" ]; then
+          args+=(--spec-versions "$TG_SPEC_VERSIONS")
+        fi
+
+        uvx "mcp-toolguard${TG_VERSION:+==$TG_VERSION}" "${args[@]}" \
+          >"$report" 2>"$stderr" && code=0 || code=$?
+
+        if [ -s "$stderr" ]; then
+          cat "$stderr" >&2
+        fi
+        # Exit 2 (or anything that produced no report) means the check could
+        # not run at all — surface the error where the report would go.
+        if [ "$code" -ge 2 ] || [ ! -s "$report" ]; then
+          {
+            echo "## ToolGuard — ⚠️ Error"
+            echo
+            echo "The check could not run:"
+            echo
+            echo '```'
+            cat "$stderr"
+            echo '```'
+          } >"$report"
+        fi
+
+        cat "$report" >>"$GITHUB_STEP_SUMMARY"
+        {
+          echo "exit-code=$code"
+          echo "passed=$([ "$code" -eq 0 ] && echo true || echo false)"
+          echo "report=$report"
+        } >>"$GITHUB_OUTPUT"
+
+    - name: Post or update the PR comment
+      if: ${{ inputs.comment == 'true' && startsWith(github.event_name, 'pull_request') }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        MARKER: "<!-- toolguard:${{ inputs.comment-id }} -->"
+        REPORT: ${{ steps.run.outputs.report }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -u
+        body="$RUNNER_TEMP/toolguard-comment.md"
+        {
+          echo "$MARKER"
+          echo
+          cat "$REPORT"
+        } >"$body"
+
+        existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+          --jq '.[] | select(.body | startswith(env.MARKER)) | .id' | head -n1)
+
+        if [ -n "$existing" ]; then
+          gh api --method PATCH "repos/$REPO/issues/comments/$existing" \
+            -F body=@"$body" --silent
+        else
+          gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            -F body=@"$body" --silent
+        fi
+
+    - name: Enforce policy
+      shell: bash
+      env:
+        CODE: ${{ steps.run.outputs.exit-code }}
+      run: exit "$CODE"

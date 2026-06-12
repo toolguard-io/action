@@ -80,3 +80,4 @@ Run the action once per server with distinct `comment-id`s:
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
